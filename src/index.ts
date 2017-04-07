@@ -1,18 +1,23 @@
 import {DevToolEnabledSource} from '@cycle/run';
 import xs, {Stream, MemoryStream} from 'xstream';
+import { Record } from './record';
 import dropRepeats from 'xstream/extra/dropRepeats';
 
 export type MainFn<So, Si> = (sources: So) => Si;
-export type Reducer<T> = (state: T | undefined) => T | undefined;
+export type Reducer<T> = (state: Record<T> | undefined) => Record<T> | undefined;
 export type Selector = (sinks: any) => any;
 export type Aggregator = (...streams: Array<Stream<any>>) => Stream<any>;
-export type Getter<T, R> = (state: T | undefined) => R | undefined;
-export type Setter<T, R> = (state: T | undefined, childState: R | undefined) => T | undefined;
+export type Getter<T> = (state: Record<T> | undefined) => T[keyof T] | undefined;
+export type Setter<T, R> = (state: Record<T> | undefined, childState: T[keyof T] | undefined) => Record<T> | undefined;
 export type Lens<T, R> = {
-  get: Getter<T, R>;
+  get: Getter<T>;
   set: Setter<T, R>;
 }
-export type Scope<T, R> = string | number | Lens<T, R>;
+export type Scope<T, R> = keyof T | Lens<T, R>;
+
+function isLens<T, R>(scope : Scope<T, R>) : scope is Lens<T, R> {
+    return !(typeof scope === 'string');
+}
 
 export function pick(selector: Selector | string) {
   if (typeof selector === 'string') {
@@ -34,13 +39,13 @@ export function mix(aggregator: Aggregator) {
   }
 }
 
-function makeGetter<T, R>(scope: Scope<T, R>): Getter<T, R> {
-  if (typeof scope === 'string' || typeof scope === 'number') {
-    return function lensGet(state) {
+function makeGetter<T, R>(scope: Scope<T, R>): Getter<T> {
+  if (!isLens(scope)) {
+    return function lensGet(state : Record<T> | undefined) {
       if (typeof state === 'undefined') {
         return void 0;
       } else {
-        return state[scope];
+        return state.get(scope);
       }
     };
   } else {
@@ -49,30 +54,14 @@ function makeGetter<T, R>(scope: Scope<T, R>): Getter<T, R> {
 }
 
 function makeSetter<T, R>(scope: Scope<T, R>): Setter<T, R> {
-  if (typeof scope === 'string' || typeof scope === 'number') {
-    return function lensSet(state: T, childState: R): T {
-      if (Array.isArray(state)) {
-        return updateArrayEntry(state, scope, childState) as any;
-      } else if (typeof state === 'undefined') {
-        return {[scope]: childState} as any as T;
-      } else {
-        return {...(state as any), [scope]: childState};
-      }
+  if (!isLens(scope)) {
+      return function lensSet(state: Record<T> | undefined, childState: T[keyof T]): Record<T> {
+        const record = typeof state === 'undefined' ? new Record<T>() : state;
+        return record.set(scope, childState);
     };
   } else {
     return scope.set;
   }
-}
-
-function updateArrayEntry<T>(array: Array<T>, scope: number | string, newVal: any): Array<T> {
-  if (newVal === array[scope]) {
-    return array;
-  }
-  const index = parseInt(scope as string);
-  if (typeof newVal === 'undefined') {
-    return array.filter((val, i) => i !== index);
-  }
-  return array.map((val, i) => i === index ? newVal : val);
 }
 
 export function isolateSource<T, R>(
@@ -88,9 +77,9 @@ export function isolateSink<T, R>(
   const set = makeSetter(scope);
 
   return innerReducer$
-    .map(innerReducer => function outerReducer(outer: T | undefined) {
+    .map(innerReducer => function outerReducer(outer: Record<T> | undefined) {
       const prevInner = get(outer);
-      const nextInner = innerReducer(prevInner);
+      const nextInner = innerReducer(prevInner as Record<R> | undefined)as any as T[keyof T];
       if (prevInner === nextInner) {
         return outer;
       } else {
@@ -100,7 +89,7 @@ export function isolateSink<T, R>(
 }
 
 export class StateSource<T> {
-  public state$: MemoryStream<T>;
+  public state$: MemoryStream<Record<T>>;
   private _name: string | null;
 
   constructor(stream: Stream<any>, name: string | null) {
@@ -109,7 +98,7 @@ export class StateSource<T> {
     if (!name) {
       return;
     }
-    (this.state$ as MemoryStream<T> & DevToolEnabledSource)._isCycleSource = name;
+    (this.state$ as MemoryStream<Record<T>> & DevToolEnabledSource)._isCycleSource = name;
   }
 
   public select<R>(scope: Scope<T, R>): StateSource<R> {
@@ -130,7 +119,7 @@ export default function onionify<So, Si>(
   return function mainOnionified(sources: Partial<So>): Partial<Si> {
     const reducerMimic$ = xs.create<Reducer<any>>();
     const state$ = reducerMimic$
-      .fold((state, reducer) => reducer(state), void 0)
+      .fold((state, reducer) => reducer(state), void 0 as Record<any> | undefined)
       .drop(1);
     sources[name] = new StateSource<any>(state$, name) as any;
     const sinks = main(sources as So);
