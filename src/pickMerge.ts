@@ -1,34 +1,39 @@
-import xs, {Stream, InternalListener, OutSender, Operator} from 'xstream';
-import {Instances} from './index';
+import xs, {Stream, InternalListener, Operator} from 'xstream';
+import {Instances, CollectionEntry} from './index';
 
-class PickMergeListener<Si, T> implements InternalListener<T>, OutSender<T> {
+class PickMergeListener<Si, T> implements InternalListener<T> {
   public ins: Stream<T>;
-  public out: Stream<T>;
+  public key: any;
   public p: PickMerge<Si, T>;
 
-  constructor(out: Stream<T>, p: PickMerge<Si, T>, ins: Stream<T>) {
+  constructor(key: any, p: PickMerge<Si, T>, ins: Stream<T>) {
+    this.key = key;
     this.ins = ins;
-    this.out = out;
     this.p = p;
   }
 
+  _start(): void {
+    if (this.ins === null) return;
+    this.ins._add(this);
+  }
+
+  _stop(): void {
+    const ins = this.ins;
+    if (ins === null) return;
+    this.ins = null as any;
+    ins._remove(this);
+  }
+
   _n(t: T): void {
-    const p = this.p, out = this.out;
-    if (out === null) {
-      return;
-    }
-    out._n(t);
+    this.p.upn(t);
   }
 
   _e(err: any): void {
-    const out = this.out;
-    if (out === null) {
-      return;
-    }
-    out._e(err);
+    this.p.upe(err);
   }
 
   _c(): void {
+    this.p.upc(this);
   }
 }
 
@@ -36,16 +41,31 @@ class PickMerge<Si, T> implements Operator<Instances<Si>, T> {
   public type = 'pickMerge';
   public ins: Stream<Instances<Si>>;
   public out: Stream<T>;
-  public sel: string;
-  public ils: Map<string, PickMergeListener<Si, T>>;
-  public inst: Instances<Si>;
+  private sel: string;
+  private ils: Map<any, PickMergeListener<Si, T>>;
+  private active: boolean;
 
   constructor(sel: string, ins: Stream<Instances<Si>>) {
     this.ins = ins;
     this.out = null as any;
     this.sel = sel;
     this.ils = new Map();
-    this.inst = null as any;
+    this.active = false;
+  }
+
+  upn(t: T): void {
+    if (this.out !== null) {
+      this.out._n(t);
+    }
+  }
+
+  upe(err: Error): void {
+    this._e(err);
+  }
+
+  upc(il: PickMergeListener<Si, T>) {
+    this.ils.delete(il.key);
+    il._stop();
   }
 
   _start(out: Stream<T>): void {
@@ -54,52 +74,35 @@ class PickMerge<Si, T> implements Operator<Instances<Si>, T> {
   }
 
   _stop(): void {
-    const ils = this.ils;
-    ils.forEach((il, key) => {
-      il.ins._remove(il);
-      il.ins = null as any;
-      il.out = null as any;
-      ils.delete(key);
-    });
-    ils.clear();
-    this.out = null as any;
+    const ils = this.ils, ins = this.ins;
+    this.out = this.ins = null as any;
     this.ils = new Map();
-    this.inst = null as any;
+    this.active = false;
+    ils.forEach(il => {
+      il._stop();
+    });
+    ins._remove(this);
   }
 
   _n(inst: Instances<Si>): void {
-    this.inst = inst;
-    const arrSinks = inst.arr;
-    const ils = this.ils;
-    const out = this.out;
-    const sel = this.sel;
-    const n = arrSinks.length;
-    // add
-    for (let i = 0; i < n; ++i) {
-      const sinks = arrSinks[i];
-      const key = sinks._key as any as string;
-      const sink = sinks[sel];
-      if (!ils.has(key)) {
-        ils.set(key, new PickMergeListener(out, this, sink));
-      }
-    }
-    for (let i = 0; i < n; ++i) {
-      const sinks = arrSinks[i];
-      const key = sinks._key as any as string;
-      const sink = sinks[sel];
-      if ((sink as any)._ils.length === 0) {
-        sink._add(ils.get(key));
-      }
-    }
-    // remove
-    ils.forEach((il, key) => {
-      if (!inst.dict.has(key) || !inst.dict.get(key)) {
-        il.ins._remove(il);
-        il.ins = null as any;
-        il.out = null as any;
-        ils.delete(key);
+    const ils = this.ils, sel = this.sel;
+    const {added, removed} = this.active ? inst : {added: new Set(inst.cache.values()), removed: new Set<CollectionEntry<Si>>()};
+    this.active = true;
+    removed.forEach(ce => {
+      const il = ils.get(ce.key);
+      if (il) {
+        ils.delete(ce.key);
+        il._stop();
       }
     });
+    added.forEach(ce => {
+      const key = ce.key;
+      const sink = ce.sinks[sel] || xs.never();
+      ils.set(key, new PickMergeListener(key, this, sink));
+    })
+    added.forEach(({key}) => {
+      (ils.get(key) as PickMergeListener<Si, T>)._start();
+    })
   }
 
   _e(err: any) {

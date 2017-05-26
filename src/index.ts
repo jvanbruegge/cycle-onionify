@@ -1,5 +1,5 @@
 import {DevToolEnabledSource} from '@cycle/run';
-import xs, {Stream, MemoryStream, InternalListener, OutSender, Operator} from 'xstream';
+import xs, {Stream, MemoryStream, InternalListener, OutSender, Operator, Listener} from 'xstream';
 import dropRepeats from 'xstream/extra/dropRepeats';
 import isolate from '@cycle/isolate';
 import {adapt} from '@cycle/run/lib/adapt';
@@ -15,46 +15,75 @@ export type Lens<T, R> = {
   set: Setter<T, R>;
 };
 export type Scope<T, R> = string | number | Lens<T, R>;
+export type CollectionEntry<Si> = {
+  key: any;
+  item: any;
+  idx: number;
+  state$: Stream<any>;
+  sinks: Si;
+};
 export type Instances<Si> = {
-  dict: Map<string, Si>,
-  arr: Array<Si & {_key: string}>,
+  cache: Map<any, CollectionEntry<Si>>;
+  added: Set<CollectionEntry<Si>>;
+  reindexed: Set<CollectionEntry<Si>>;
+  removed: Set<CollectionEntry<Si>>;
 };
 
 function defaultGetKey(statePiece: any) {
   return statePiece.key;
 }
 
-function instanceLens(getKey: any, key: string): Lens<Array<any>, any> {
+const identityLens = {
+  get(state: any): any {
+    return state;
+  },
+  set(oldState:any, newState: any): any {
+    return newState;
+  },
+};
+
+function instanceLens<It>(getKey: any, key: any): Lens<Array<It>, It> {
   return {
-    get(arr: Array<any> | undefined): any {
-      if (typeof arr === 'undefined') {
-        return void 0;
-      } else {
-        for (let i = 0, n = arr.length; i < n; ++i) {
-          if (getKey(arr[i]) === key) {
-            return arr[i];
+    get(arr: Array<It> | undefined): It | undefined {
+      if (typeof arr !== 'undefined') {
+        let n = arr.length;
+        while (n--) {
+          if (getKey(arr[n]) === key) {
+            return arr[n];
           }
         }
-        return void 0;
       }
+      return void 0;
     },
-
-    set(arr: Array<any> | undefined, item: any): any {
+    set(arr: Array<It> | undefined, item: It | undefined): Array<It> | undefined {
       if (typeof arr === 'undefined') {
-        return [item];
-      } else if (typeof item === 'undefined') {
-        return arr.filter(s => getKey(s) !== key);
+        return typeof item === 'undefined' ? void 0 : [item];
       } else {
-        return arr.map(s => {
-          if (getKey(s) === key) {
-            return item;
-          } else {
-            return s;
+        let n = arr.length;
+        while (n--) {
+          if (getKey(arr[n]) === key) {
+            const outArr = arr.slice();
+            if (typeof item === 'undefined') {
+              outArr.splice(n, 1);
+            } else {
+              outArr[n] = item;
+            }
+            return outArr;
           }
-        });
+        }
+        return arr;
       }
-    },
-  };
+    }
+  }
+}
+
+function isolateChild<Si>(itemComp: any, getKey: any, key: any, state$: Stream<any>, name: string): any {
+  function ChildComponent(sources) {
+    const sinks = itemComp({...sources, onion: new StateSource(state$, name, false)});
+    return sinks.onion ? {...sinks, onion: isolateSink(sinks.onion, instanceLens(getKey, key))} : sinks;
+  }
+  const scopes = {'*': '$' + key, 'onion': identityLens};
+  return isolate(ChildComponent, scopes);
 }
 
 const identityLens = {
@@ -132,10 +161,10 @@ export class StateSource<T> {
   private _state$: MemoryStream<T>;
   private _name: string;
 
-  constructor(stream: Stream<any>, name: string) {
+  constructor(stream: Stream<any>, name: string, dedupe: boolean = true) {
     this._state$ = stream
       .filter(s => typeof s !== 'undefined')
-      .compose(dropRepeats())
+      .compose(dedupe ? dropRepeats() : s => s)
       .remember();
     this._name = name;
     this.state$ = adapt(this._state$);
@@ -190,46 +219,46 @@ export class StateSource<T> {
   public asCollection<Si>(itemComp: (so: any) => Si,
                           sources: any,
                           getKey: any = defaultGetKey): Stream<Instances<Si>> {
-    const array$ = this._state$;
-    const name = this._name;
-
-    const collection$ = array$.fold((acc: Instances<Si>, nextState: Array<any> | any) => {
-      const dict = acc.dict;
-      if (Array.isArray(nextState)) {
-        const nextInstArray = Array(nextState.length) as Array<Si & {_key: string}>;
-        const nextKeys = new Set<string>();
-        // add
-        for (let i = 0, n = nextState.length; i < n; ++i) {
-          const key = getKey(nextState[i]);
-          nextKeys.add(key);
-          if (dict.has(key)) {
-            nextInstArray[i] = dict.get(key) as any;
-          } else {
-            const scopes = {'*': '$' + key, [name]: instanceLens(getKey, key)};
-            const sinks = isolate(itemComp, scopes)(sources);
-            dict.set(key, sinks);
-            nextInstArray[i] = sinks;
-          }
-          nextInstArray[i]._key = key;
-        }
+      const collection$ = sources.onion.state$.fold((acc: Instances<Si>, arr: Array<any>) => {
+        arr = arr || [];
+        const cache = acc.cache;
+        const added = new Set<CollectionEntry<Si>>();
+        const reindexed = new Set<CollectionEntry<Si>>();
+        const removed = new Set<CollectionEntry<Si>>();
+        const nextKeys = new Set(arr.map(getKey));
         // remove
-        dict.forEach((_, key) => {
+        cache.forEach((cached, key) => {
           if (!nextKeys.has(key)) {
-            dict.delete(key);
+            cache.delete(key);
+            removed.add(cached);
           }
         });
-        nextKeys.clear();
-        return {dict: dict, arr: nextInstArray};
-      } else {
-        dict.clear();
-        const key = getKey(nextState);
-        const scopes = {'*': '$' + key, [name]: identityLens};
-        const sinks = isolate(itemComp, scopes)(sources);
-        dict.set(key, sinks);
-        return {dict: dict, arr: [sinks]}
-      }
-    }, {dict: new Map(), arr: []} as Instances<Si>);
-
+        // add and reindex
+        let idx = arr.length;
+        while (idx--) {
+          const item = arr[idx];
+          const key = getKey(item);
+          const cached = cache.get(key);
+          if (typeof cached === 'undefined') {
+            const entry = {key, item, idx, start(li: Listener<any>) { li.next(this.item); }, stop() {}, state$: null as any, sinks: null as any};
+            entry.state$ = xs.create(entry);
+            entry.sinks = isolateChild(itemComp, getKey, key, entry.state$, this._name)(sources);
+            cache.set(key, entry);
+            added.add(entry);
+          } else {
+            if (cached.idx !== idx) {
+              cached.idx = idx;
+              reindexed.add(cached);
+            }
+            if (cached.item !== item) {
+              cached.item = item;
+              cached.state$.shamefullySendNext(item);
+            }
+          }
+        };
+        return {cache, added, reindexed, removed};
+      }, {cache: new Map(), added: new Set(), removed: new Set(), reindexed: new Set()} as Instances<Si>);
+>>>>>>> Optimize collection handling
     return collection$;
   }
 
