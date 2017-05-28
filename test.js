@@ -574,7 +574,7 @@ test('should work with an isolated child component on an array entry', t => {
 });
 
 test.cb('should work with collection() and an isolated list children', t => {
-  t.plan(6);
+  t.plan(7);
 
   function Child(sources) {
     const defaultReducer$ = xs.of(prev => {
@@ -608,7 +608,8 @@ test.cb('should work with collection() and an isolated list children', t => {
       [{key: 'a', val: 3}, {key: 'b', val: null}],
       [{key: 'a', val: 3}, {key: 'b', val: 10}],
       [{key: 'a', val: 3}, {key: 'b', val: 10}, {key: 'c', val: 27}],
-      [{key: 'a', val: 3}, {key: 'b', val: 10}]
+      [{key: 'a', val: 3}, {key: 'b', val: 10}],
+      [{key: 'b', val: 10}, {key: 'a', val: 3}]
     ];
 
     sources.onion.state$.addListener({
@@ -640,7 +641,9 @@ test.cb('should work with collection() and an isolated list children', t => {
       return {list: prev.list.concat({key: 'c', val: 27})};
     }).compose(delay(100));
 
-    const parentReducer$ = xs.merge(initReducer$, addReducer$)
+    const moveReducer$ = xs.of(({list: [x, ...xs]}) => ({list: [...xs, x]})).compose(delay(200));
+
+    const parentReducer$ = xs.merge(initReducer$, addReducer$, moveReducer$);
     const reducer$ = xs.merge(parentReducer$, childReducer$);
 
     return {
