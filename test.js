@@ -3,8 +3,6 @@ import xs from 'xstream';
 import delay from 'xstream/extra/delay';
 import isolate from '@cycle/isolate';
 import onionify, {
-  pickCombine,
-  pickMerge,
   isolateSource,
   isolateSink,
 } from './lib/index';
@@ -594,14 +592,6 @@ test.cb('should work with collection() and an isolated list children', t => {
     };
   }
 
-  function List(sources) {
-    const instances$ = sources.onion.asCollection(Child, sources);
-    const reducer$ = instances$.compose(pickMerge('onion'));
-     return {
-       onion: reducer$,
-     }
-  }
-
   function Main(sources) {
     const expected = [
       [{key: 'a', val: 3}],
@@ -614,7 +604,7 @@ test.cb('should work with collection() and an isolated list children', t => {
 
     sources.onion.state$.addListener({
       next(x) {
-        t.deepEqual(x.list, expected.shift());
+        t.deepEqual(x.deep.list, expected.shift());
         if (expected.length === 0) {
           t.pass();
           t.end();
@@ -628,20 +618,26 @@ test.cb('should work with collection() and an isolated list children', t => {
       },
     });
 
-    const childSinks = isolate(List, 'list')(sources);
+    const childSinks = sources.onion
+      .select('deep')
+      .select('list')
+      .asCollection(Child, sources)
+      .pick({
+        onion: 'merge'
+      });;
     const childReducer$ = childSinks.onion;
 
     const initReducer$ = xs.of(function initReducer(prevState) {
-      return { list: [{key: 'a', val: 3}] };
+      return { deep: {list: [{key: 'a', val: 3}] } };
     });
 
     const addReducer$ = xs.of(function addB(prev) {
-      return {list: prev.list.concat({key: 'b', val: null})};
+      return {deep: {list: prev.deep.list.concat({key: 'b', val: null})}};
     }, function addC(prev) {
-      return {list: prev.list.concat({key: 'c', val: 27})};
+      return {deep: {list: prev.deep.list.concat({key: 'c', val: 27})}};
     }).compose(delay(100));
 
-    const moveReducer$ = xs.of(({list: [x, ...xs]}) => ({list: [...xs, x]})).compose(delay(200));
+    const moveReducer$ = xs.of(({deep: {list: [x, ...xs]}}) => ({deep: {list: [...xs, x]}})).compose(delay(200));
 
     const parentReducer$ = xs.merge(initReducer$, addReducer$, moveReducer$);
     const reducer$ = xs.merge(parentReducer$, childReducer$);
@@ -677,11 +673,11 @@ test.cb('should work with collection() and a custom item key', t => {
   }
 
   function List(sources) {
-    const instances$ = sources.onion.asCollection(Child, sources, s => s.id);
-    const reducer$ = instances$.compose(pickMerge('onion'));
-     return {
-       onion: reducer$,
-     }
+    return sources.onion
+      .asCollection(Child, sources, s => s.id)
+      .pick({
+        onion: 'merge'
+      });
   }
 
   function Main(sources) {

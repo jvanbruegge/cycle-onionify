@@ -3,8 +3,8 @@ import xs, {Stream, MemoryStream, InternalListener, OutSender, Operator, Listene
 import dropRepeats from 'xstream/extra/dropRepeats';
 import isolate from '@cycle/isolate';
 import {adapt} from '@cycle/run/lib/adapt';
-export {pickCombine} from './pickCombine';
-export {pickMerge} from './pickMerge';
+import {pickCombine} from './pickCombine';
+import {pickMerge} from './pickMerge';
 
 export type MainFn<So, Si> = (sources: So) => Si;
 export type Reducer<T> = (state: T | undefined) => T | undefined;
@@ -22,6 +22,7 @@ export type CollectionEntry<Si> = {
   state$: Stream<any>;
   sinks: Si;
 };
+export type PickType = 'merge' | 'combine';
 export type Instances<Si> = {
   cache: Map<any, CollectionEntry<Si>>;
   added: Set<CollectionEntry<Si>>;
@@ -214,9 +215,9 @@ export class StateSource<T> {
    */
   public asCollection<Si>(itemComp: (so: any) => Si,
                           sources: any,
-                          getKey: any = defaultGetKey): Stream<Instances<Si>> {
-      const collection$ = sources.onion.state$.fold((acc: Instances<Si>, arr: Array<any>) => {
-        arr = arr || [];
+                          getKey: any = defaultGetKey): CollectionSource<Si> {
+      const inst$ = this.state$.fold((acc: Instances<Si>, input: T) => {
+        const arr = input as any as Array<any> || [];
         const cache = acc.cache;
         const added = new Set<CollectionEntry<Si>>();
         const reindexed = new Set<CollectionEntry<Si>>();
@@ -255,8 +256,7 @@ export class StateSource<T> {
         };
         return {cache, added, reindexed, removed};
       }, {cache: new Map(), added: new Set(), removed: new Set(), reindexed: new Set()} as Instances<Si>);
->>>>>>> Optimize collection handling
-    return collection$;
+    return new CollectionSource<Si>(inst$);
   }
 
   public isolateSource<R>(_: StateSource<T> | undefined, scope: Scope<T, R>): StateSource<R> {
@@ -277,7 +277,19 @@ export class StateSource<T> {
       });
   }
 }
+
+
+export class CollectionSource<T> {
+  public constructor(private _inst$: Stream<Instances<T>>) { }
+
+  public pick<K extends keyof T>(sel: {[P in K]: PickType}): {[P in K]: Stream<any>} {
+    const inst$ = this._inst$;
+    return Object.keys(sel)
+      .map((s: string) => ({[s]: inst$.compose(sel[s] === 'merge' ? pickMerge(s) : pickCombine(s))}))
+      .reduce(Object.assign, {});
+  }
 }
+
 
 /**
  * While we are waiting for keyof subtraction to land in TypeScript,
