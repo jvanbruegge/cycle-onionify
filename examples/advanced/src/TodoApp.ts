@@ -2,10 +2,10 @@ import xs, {Stream} from 'xstream';
 import isolate from '@cycle/isolate';
 import {div, span, input, button, ul, VNode, DOMSource} from '@cycle/dom';
 import {StateSource} from 'cycle-onionify';
-import List, {Sources as ListSources, State as ListState} from './List';
+import Item, {Sources as ItemSources, State as ItemState} from './Item';
 
 export interface State {
-  list: ListState;
+  list: Array<ItemState>;
 }
 
 export type Reducer = (prev?: State) => State | undefined;
@@ -50,8 +50,8 @@ function model(actions: Actions): Stream<Reducer> {
   return xs.merge(initReducer$, addReducer$);
 }
 
-function view(listVNode$: Stream<VNode>): Stream<VNode> {
-  return listVNode$.map(ulVNode =>
+function view(listVNodes$: Stream<Array<VNode>>): Stream<VNode> {
+  return listVNodes$.map(ul).map(ulVNode =>
     div([
       span('New task:'),
       input('.input', {attrs: {type: 'text'}}),
@@ -62,7 +62,13 @@ function view(listVNode$: Stream<VNode>): Stream<VNode> {
 }
 
 export default function TodoApp(sources: Sources): Sinks {
-  const listSinks = isolate(List, 'list')(sources as any as ListSources);
+  const listSinks = sources.onion
+    .select('list')
+    .asCollection(Item, sources)
+    .pick({
+      onion: 'merge',
+      DOM: 'combine'
+    });
   const action$ = intent(sources.DOM);
   const parentReducer$ = model(action$);
   const listReducer$ = listSinks.onion as any as Stream<Reducer>;

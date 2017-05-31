@@ -3,10 +3,10 @@ import isolate from '@cycle/isolate';
 import {div, VNode, DOMSource} from '@cycle/dom';
 import {StateSource, Lens} from 'cycle-onionify';
 import Edit, {State as EditState} from './Edit';
-import List, {State as ListState} from './List';
+import Item, {State as ItemState} from './Item';
 
 export type State = {
-  list: ListState;
+  list: Array<ItemState & {key: string}>;
   currentIndex: number;
 }
 
@@ -33,7 +33,7 @@ export default function RadioApp(sources: Sources): Sinks {
     };
   });
 
-  const listLens: Lens<State, ListState> = {
+  const listLens: Lens<State, Array<ItemState & {key: string}>> = {
     get: state => state.list,
     set: (state, childState) => {
       const idx = (childState as any).findIndex((item: any, i: number) =>
@@ -60,23 +60,27 @@ export default function RadioApp(sources: Sources): Sinks {
     })
   }
 
-  const listSinks: Sinks = isolate(List, {onion: listLens})(sources);
-  const listVDom = listSinks.DOM;
-  const listReducer$ = listSinks.onion;
+  const listSinks = sources.onion
+    .select(listLens)
+    .asCollection(Item, sources)
+    .pick({
+      onion: 'merge',
+      DOM: 'combine'
+    });
 
   const editSinks: Sinks = isolate(Edit, {onion: selectedLens})(sources);
   const editVDom = editSinks.DOM;
   const editReducer$ = editSinks.onion;
 
-  const vdom$ = xs.combine(listVDom, editVDom)
-    .map(([listVNode, editVNode]) =>
+  const vdom$ = xs.combine(listSinks.DOM, editVDom)
+    .map(([itemVNodes, editVNode]) =>
       div([
         editVNode,
-        listVNode
+        div({style: {marginTop: '20px'}}, itemVNodes)
       ])
     );
 
-  const reducer$ = xs.merge(initReducer$, listReducer$, editReducer$);
+  const reducer$ = xs.merge(initReducer$, listSinks.onion, editReducer$);
 
   return {
     DOM: vdom$,

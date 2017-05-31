@@ -1,7 +1,7 @@
 import xs, {Stream} from 'xstream';
 import isolate from '@cycle/isolate';
 import {div, h1, hr, button, VNode, DOMSource} from '@cycle/dom';
-import {StateSource, Lens, collection, pickCombine, pickMerge} from 'cycle-onionify';
+import {StateSource, Lens} from 'cycle-onionify';
 import BmiCounter, {State as BmiState, bmi, randomCounter} from './BmiCounter';
 
 export type State = Array<BmiState & {key: number}>;
@@ -65,16 +65,19 @@ function view(bmiVnodes$: Stream<Array<VNode>>, state$: Stream<State>): Stream<V
 }
 
 export default function BmiApp(sources: Sources): Sinks {
-  const childSinks$ = collection(BmiCounter, sources);
-  const childReducer$ = childSinks$.compose(pickMerge('onion'));
-  const childVNodes$ = childSinks$.compose(pickCombine('DOM'));
+  const childSinks = sources.onion
+    .asCollection(BmiCounter, sources)
+    .pick({
+      onion: 'merge',
+      DOM: 'combine'
+    });
   const actions = intent(sources.DOM);
   const parentReducer$ = model(actions);
   const reducer$ = xs.merge(
     parentReducer$,
-    childReducer$
+    childSinks.onion
   );
-  const vdom$ = view(childVNodes$, sources.onion.state$);
+  const vdom$ = view(childSinks.DOM, sources.onion.state$);
   return {
     DOM: vdom$,
     onion: reducer$,
