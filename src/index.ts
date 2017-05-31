@@ -77,12 +77,22 @@ function instanceLens<It>(getKey: any, key: any): Lens<Array<It>, It> {
   }
 }
 
-function isolateChild<Si>(itemComp: any, getKey: any, key: any, state$: Stream<any>, name: string): any {
+function makeL<T, R>(scope: Scope<T, R>): Lens<T, R> {
+  return {get: makeGetter(scope), set: makeSetter(scope)};
+}
+
+function compL<A, B, C>(a2b: Lens<A, B>, b2c: Lens<B, C>): Lens<A, C> {
+  const get = (s: A) => b2c.get(a2b.get(s))
+  const set = (s: A, a: C) => a2b.set(s, b2c.set(a2b.get(s), a))
+  return {get, set}
+}
+
+function isolateChild<Si>(itemComp: any, key: any, childOnion: StateSource<any>, name: string): any {
   function ChildComponent(sources) {
-    const sinks = itemComp({...sources, onion: new StateSource(state$, name, false)});
-    return sinks.onion ? {...sinks, onion: isolateSink(sinks.onion, instanceLens(getKey, key))} : sinks;
+    const sinks = itemComp({...sources, [name]: childOnion});
+    return sinks[name] ? {...sinks, [name]: childOnion.isolateSink(sinks[name], identityLens)} : sinks;
   }
-  const scopes = {'*': '$' + key, 'onion': identityLens};
+  const scopes = {'*': '$' + key, [name]: identityLens};
   return isolate(ChildComponent, scopes);
 }
 
@@ -132,41 +142,27 @@ function updateArrayEntry<T>(array: Array<T>, scope: number | string, newVal: an
   return array.map((val, i) => i === index ? newVal : val);
 }
 
-export function isolateSource<T, R>(
-                             source: StateSource<T>,
-                             scope: Scope<T, R>): StateSource<R> {
-  return source.select(scope);
+export function isolateSource<T, R>(source: StateSource<T>, scope: Scope<T, R>): StateSource<R> {
+  return source.isolateSource(undefined, scope);
 }
 
-export function isolateSink<T, R>(
-                           innerReducer$: Stream<Reducer<R>>,
-                           scope: Scope<T, R>): Stream<Reducer<T>> {
-  const get = makeGetter(scope);
-  const set = makeSetter(scope);
-
-  return innerReducer$
-    .map(innerReducer => function outerReducer(outer: T | undefined) {
-      const prevInner = get(outer);
-      const nextInner = innerReducer(prevInner);
-      if (prevInner === nextInner) {
-        return outer;
-      } else {
-        return set(outer, nextInner);
-      }
-    });
+export function isolateSink<T, R>(innerReducer$: Stream<Reducer<R>>, scope: Scope<T, R>): Stream<Reducer<T>> {
+  return new StateSource(xs.never(), '', identityLens).isolateSink(innerReducer$, scope);
 }
 
 export class StateSource<T> {
   public state$: MemoryStream<T>;
   private _state$: MemoryStream<T>;
   private _name: string;
+  private _lens: Lens<any, T>;
 
-  constructor(stream: Stream<any>, name: string, dedupe: boolean = true) {
-    this._state$ = stream
+  constructor(state$: Stream<any>, name: string, lens: Lens<any,T>, dedupe: boolean = true) {
+    this._name = name;
+    this._lens = lens;
+    this._state$ = state$
       .filter(s => typeof s !== 'undefined')
       .compose(dedupe ? dropRepeats() : s => s)
       .remember();
-    this._name = name;
     this.state$ = adapt(this._state$);
     (this._state$ as MemoryStream<T> & DevToolEnabledSource)._isCycleSource = name;
   }
@@ -182,8 +178,8 @@ export class StateSource<T> {
    * custom way of selecting something from the state object.
    */
   public select<R>(scope: Scope<T, R>): StateSource<R> {
-    const get = makeGetter(scope);
-    return new StateSource<R>(this._state$.map(get), this._name);
+    const t2r = makeL(scope);
+    return new StateSource<R>(this._state$.map(t2r.get), this._name, compL(this._lens, t2r));
   }
 
   /**
@@ -242,7 +238,8 @@ export class StateSource<T> {
           if (typeof cached === 'undefined') {
             const entry = {key, item, idx, start(li: Listener<any>) { li.next(this.item); }, stop() {}, state$: null as any, sinks: null as any};
             entry.state$ = xs.create(entry);
-            entry.sinks = isolateChild(itemComp, getKey, key, entry.state$, this._name)(sources);
+            const childOnion = new StateSource<any>(entry.state$, this._name, compL<any, any, any>(this._lens, instanceLens(getKey, key)), false);
+            entry.sinks = isolateChild(itemComp, key, childOnion, this._name)(sources);
             cache.set(key, entry);
             added.add(entry);
           } else {
@@ -262,8 +259,24 @@ export class StateSource<T> {
     return collection$;
   }
 
-  public isolateSource = isolateSource;
-  public isolateSink = isolateSink;
+  public isolateSource<R>(_: StateSource<T> | undefined, scope: Scope<T, R>): StateSource<R> {
+    return new StateSource<R>(this._state$.map(makeGetter(scope)), this._name, identityLens);
+  }
+
+  public isolateSink<R>(innerReducer$: Stream<Reducer<R>>, scope: Scope<T, R>): Stream<Reducer<T>> {
+    const {get, set} = compL(this._lens, makeL(scope));
+    return innerReducer$
+      .map(innerReducer => function outerReducer(outer: T | undefined) {
+        const prevInner = get(outer);
+        const nextInner = innerReducer(prevInner);
+        if (prevInner === nextInner) {
+          return outer;
+        } else {
+          return set(outer, nextInner);
+        }
+      });
+  }
+}
 }
 
 /**
@@ -321,7 +334,7 @@ export default function onionify<T, So extends OSo<T>, Si extends OSi<T>>(
     const state$ = reducerMimic$
       .fold((state, reducer) => reducer(state), void 0 as (T | undefined))
       .drop(1);
-    sources[name] = new StateSource<any>(state$, name);
+    sources[name] = new StateSource<any>(state$, name, identityLens);
     const sinks = main(sources as So);
     if (sinks[name]) {
       const stream$ = xs.fromObservable<Reducer<T>>(sinks[name]);
