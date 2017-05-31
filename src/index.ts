@@ -83,8 +83,12 @@ function makeL<T, R>(scope: Scope<T, R>): Lens<T, R> {
 }
 
 function compL<A, B, C>(a2b: Lens<A, B>, b2c: Lens<B, C>): Lens<A, C> {
-  const get = (s: A) => b2c.get(a2b.get(s))
-  const set = (s: A, a: C) => a2b.set(s, b2c.set(a2b.get(s), a))
+  if (a2b === identityLens) return b2c as any;
+  if (b2c === identityLens) return a2b as any;
+  const {get: gb, set: sa} = a2b;
+  const {get: gc, set: sb} = b2c;
+  const get = (s: A) => gc(gb(s))
+  const set = (s: A, c: C) => sa(s, sb(gb(s), c))
   return {get, set}
 }
 
